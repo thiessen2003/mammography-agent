@@ -1,0 +1,126 @@
+# Arquivo .gitignore para projeto Python ML com LangChain
+
+# Diretórios e arquivos do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Diretórios de ambiente virtual
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Arquivos de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos de sistema
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# Arquivos de dados e modelos grandes
+data/
+*.csv
+*.json
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.model
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Diretórios de modelos (geralmente grandes)
+models/
+saved_models/
+checkpoints/
+weights/
+
+# Cache do LangChain
+.langchain/
+.cache/
+
+# Arquivos de API keys e secrets
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+secrets.py
+config_secret.py
+
+# Arquivos de experiment tracking (geralmente contêm dados sensíveis)
+mlruns/
+wandb/
+*.tfevents
+
+# Arquivos temporários
+temp/
+tmp/
+
+# Documentação
+docs/_build/
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+
+# PyTest
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+
+# Exceções (se precisar versionar alguns dados pequenos)
+!data/sample.csv
+!data/example.json
+
+# Arquivos de configuração específicos do projeto (mantenha se necessário)
+# !config/production.yml
+# !config/development.yml
