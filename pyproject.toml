@@ -7,4 +7,5 @@ requires-python = ">=3.13"
 dependencies = [
     "openai>=1.99.9",
     "pydantic>=2.0.0",  # For schema validation
+    "numpy>=1.24.0",    # For numerical calculations in risk assessment
 ]
