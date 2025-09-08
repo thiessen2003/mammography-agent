@@ -1,12 +1,9 @@
 import json
 import base64
-from typing import Any, Dict, List, TypedDict, Optional
-from dataclasses import dataclass
+from typing import Any, Dict, TypedDict
 from PIL import Image
 import io
 
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama.llms import Ollama
 from langchain_ollama.chat_models import ChatOllama
 from langgraph.graph import StateGraph, START, END
 
