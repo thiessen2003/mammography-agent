@@ -10,34 +10,41 @@ from langchain_ollama.llms import Ollama
 from langchain_ollama.chat_models import ChatOllama
 from langgraph.graph import StateGraph, START, END
 
+
 class State(TypedDict, total=False):
-    mri_image: str
-    attention_heatmap: str
+    mri_image: str  # agora pode ser caminho ou base64
+    attention_heatmap: str  # caminho ou base64
     prepared_inputs: Dict[str, Any]
     llm_raw: Any
     llm_parsed: Dict[str, Any]
     final_report: Dict[str, Any]
 
-def encode_image_to_base64(image_path: str) -> str:
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def encode_image_with_pil(image_path_or_base64: str) -> str:
+    if image_path_or_base64.startswith(("iVB", "/9")):
+        return image_path_or_base64
+
+    with Image.open(image_path_or_base64) as img:
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
 
 def prepare_multimodal_inputs(state: State) -> Dict[str, Any]:
     mri_image = state.get("mri_image", "")
     heatmap_image = state.get("attention_heatmap", "")
-    
+
     prepared = {
-        "mri_image": mri_image,
-        "heatmap_image": heatmap_image,
+        "mri_image": encode_image_with_pil(mri_image),
+        "heatmap_image": encode_image_with_pil(heatmap_image),
     }
+
     state["prepared_inputs"] = prepared
     return state
 
+
 MULTIMODAL_PROMPT = """
-SYSTEM: You are an evidence_analyst helping a radiologist analyze breast medical images.
-You will be given two images:
-1. A breast MRI image
-2. A heatmap highlighting dense regions of interest in the breast
+SYSTEM: You are an evidence_analyst helping a radiologist analyze breast medical images. You will be given two images: 1. A breast MRI image 2. A heatmap highlighting dense regions of interest in the breast
 
 INSTRUCTION: Analyze both images carefully and output ONLY a single JSON object (no surrounding text) with the following exact schema:
 
@@ -59,11 +66,12 @@ multimodal_model = ChatOllama(
     format="json"
 )
 
+
 def multimodal_eval(state: State) -> Dict[str, Any]:
     prepared = state.get("prepared_inputs", {})
     mri_image = prepared.get("mri_image", "")
     heatmap_image = prepared.get("heatmap_image", "")
-    
+
     messages = [
         {
             "role": "user",
@@ -74,12 +82,11 @@ def multimodal_eval(state: State) -> Dict[str, Any]:
             ]
         }
     ]
-    
+
     try:
         response = multimodal_model.invoke(messages)
         raw_text = response.content if hasattr(response, 'content') else str(response)
-        
-        parsed: Dict[str, Any]
+
         try:
             parsed = json.loads(raw_text)
             required_keys = ["dense_tissue_present", "density_confidence", "birads_score"]
@@ -94,6 +101,7 @@ def multimodal_eval(state: State) -> Dict[str, Any]:
                 "recommended_next_step": "Unable to parse LLM output. Review images and try again.",
                 "clinical_notes": f"JSON parsing failed. Raw output: {str(raw_text)[:500]}"
             }
+
     except Exception as e:
         parsed = {
             "dense_tissue_present": False,
@@ -104,10 +112,11 @@ def multimodal_eval(state: State) -> Dict[str, Any]:
             "clinical_notes": f"Error: {str(e)}"
         }
         raw_text = f"Error: {str(e)}"
-    
+
     state["llm_raw"] = raw_text
     state["llm_parsed"] = parsed
     return state
+
 
 def final_multimodal_report(state: State) -> Dict[str, Any]:
     parsed = state.get("llm_parsed", {})
@@ -122,6 +131,7 @@ def final_multimodal_report(state: State) -> Dict[str, Any]:
     state["final_report"] = report
     return state
 
+
 builder = StateGraph(State)
 builder.add_node("prepare_inputs", prepare_multimodal_inputs)
 builder.add_node("multimodal_eval", multimodal_eval)
@@ -133,11 +143,12 @@ builder.add_edge("final_report", END)
 builder.set_entry_point("prepare_inputs")
 graph = builder.build()
 
+
 if __name__ == "__main__":
     example_state: State = {
-        "mri_image": "base64_encoded_mri_image_here",
-        "attention_heatmap": "base64_encoded_heatmap_here"
+        "mri_image": "path/to/mri.png",
+        "attention_heatmap": "path/to/heatmap.png"
     }
-    
+
     out = graph.invoke(example_state)
     print(json.dumps(out["final_report"], indent=2, ensure_ascii=False))
