@@ -70,13 +70,10 @@ def multimodal_eval(state: State) -> Dict[str, Any]:
     heatmap_image = prepared.get("heatmap_image", "")
 
     messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": MULTIMODAL_PROMPT},
-                {"type": "image", "image": mri_image},
-                {"type": "image", "image": heatmap_image}
-            ]
+    {
+        "role": "user",
+        "content": MULTIMODAL_PROMPT,
+        "images": [mri_image, heatmap_image]
         }
     ]
 
