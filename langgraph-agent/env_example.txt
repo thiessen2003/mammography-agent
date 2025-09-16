@@ -1,0 +1,18 @@
+# Environment variables for the breast imaging analysis system
+
+# OpenAI API Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+
+# LangSmith Configuration (optional)
+LANGSMITH_API_KEY=your_langsmith_api_key_here
+LANGSMITH_PROJECT=breast-imaging-analysis
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+
+# OpenTelemetry Configuration (optional)
+JAEGER_ENDPOINT=http://localhost:14268/api/traces
+SERVICE_NAME=breast-imaging-agent
+
+# Agent Configuration
+VOTING_THRESHOLD=0.6
+MAX_RETRIES=3
+TIMEOUT_SECONDS=30
