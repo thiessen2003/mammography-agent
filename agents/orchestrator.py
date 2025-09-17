@@ -1,336 +1,402 @@
-from openai import OpenAI
-from typing import Dict, Any, List, Optional
-from .data.user_input import UserInputDTO
-from .image_analyzer import ImageAnalyzer
-from .text_analyzer import TextAnalyzer
-from .static.messages import system_message_orchestrator
-from pydantic import BaseModel, Field, ValidationError
-from typing import List, Literal
-import json
-import logging
+"""
+Orchestrator agent for coordinating parallel analysis agents and implementing voting mechanism.
+"""
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+import asyncio
+import logging
+import time
+from typing import Dict, Any, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from .base_agent import BaseAgent
+from .image_analysis_agent import ImageAnalysisAgent
+from .text_analysis_agent import TextAnalysisAgent
+from .risk_assessment_agent import RiskAssessmentAgent
+from .symptom_analysis_agent import SymptomAnalysisAgent
+from .clinical_correlation_agent import ClinicalCorrelationAgent
+from schemas.analysis import (
+    OrchestratorResult, AgentAnalysis, ConsensusVotes, 
+    AnalysisRequest, AnalysisResponse, UrgencyLevel
+)
+from config import config
+
 logger = logging.getLogger(__name__)
 
 
-class ActionPlan(BaseModel):
-    """Schema for action plans returned by the AI model."""
-    action: Literal["analyze_image", "analyze_text", "request_info", "evaluate"]
-    reason: str
-    required_fields: List[str] = Field(default_factory=list)
-
-
-class Orchestrator:
-    """
-    Orchestrator class that implements ReAct pattern for medical case evaluation.
-    Coordinates between ImageAnalyzer and TextAnalyzer agents with feedback loops.
-    """
+class OrchestratorAgent(BaseAgent):
+    """Orchestrator agent that coordinates parallel analysis agents and implements voting mechanism."""
     
-    def __init__(self, api_key: Optional[str] = None):
-        logger.info("Initializing Orchestrator...")
-        if api_key:
-            logger.info(f"Using provided API key: {api_key[:7]}...")
-        else:
-            logger.info("No API key provided, using environment variable")
+    def __init__(self):
+        """Initialize the orchestrator agent."""
+        super().__init__(
+            agent_id="orchestrator",
+            prompt_file="orchestrator"
+        )
         
-        self.client = OpenAI(api_key=api_key) if api_key else OpenAI()
-        logger.info("OpenAI client created successfully")
+        # Initialize analysis agents
+        self.agents = {
+            'image_analysis': ImageAnalysisAgent(),
+            'text_analysis': TextAnalysisAgent(),
+            'risk_assessment': RiskAssessmentAgent(),
+            'symptom_analysis': SymptomAnalysisAgent(),
+            'clinical_correlation': ClinicalCorrelationAgent()
+        }
         
-        self.image_analyzer = ImageAnalyzer(api_key=api_key)
-        logger.info("ImageAnalyzer initialized successfully")
-        
-        self.text_analyzer = TextAnalyzer(api_key=api_key)
-        logger.info("TextAnalyzer initialized successfully")
-        
-        self.max_iterations = 3
-        self.conversation_history: List[Dict[str, Any]] = []
-        logger.info("Orchestrator initialization completed successfully")
-        
-    def evaluate_response(self, user_input: UserInputDTO) -> Dict[str, Any]:
-        """
-        Main evaluation method implementing ReAct pattern.
+        self.max_workers = 5  # Number of parallel workers
+    
+    def analyze(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Orchestrate parallel analysis and implement voting mechanism.
         
         Args:
-            user_input: UserInputDTO object containing user query and image
+            input_data: Dictionary containing:
+                - case_id: Unique case identifier
+                - images: List of medical images
+                - texts: List of medical texts
+                - patient_info: Patient information
+                - clinical_context: Clinical context
+                
+        Returns:
+            Orchestrator analysis results
+        """
+        start_time = time.time()
+        case_id = input_data.get('case_id', 'unknown')
+        
+        try:
+            logger.info(f"Starting orchestrated analysis for case {case_id}")
+            
+            # Run parallel analysis
+            agent_results = self._run_parallel_analysis(input_data)
+            
+            # Implement voting mechanism
+            voting_result = self._implement_voting_mechanism(agent_results)
+            
+            # Create final assessment
+            final_result = self._create_final_assessment(
+                agent_results, voting_result, input_data
+            )
+            
+            processing_time = time.time() - start_time
+            final_result['processing_time_seconds'] = processing_time
+            
+            logger.info(f"Orchestrated analysis completed for case {case_id} in {processing_time:.2f}s")
+            return final_result
+            
+        except Exception as e:
+            logger.error(f"Orchestrated analysis failed for case {case_id}: {e}")
+            return self._handle_error(e, input_data)
+    
+    def _run_parallel_analysis(self, input_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Run all analysis agents in parallel.
+        
+        Args:
+            input_data: Input data for analysis
             
         Returns:
-            Dict containing evaluation results and recommendations
+            Dictionary of agent results
         """
-        logger.info(f"Starting evaluation for user: {user_input.get('username', 'Unknown')}")
+        agent_results = {}
         
-        # Initialize ReAct loop
-        iteration = 0
-        current_state = self._initialize_state(user_input)
+        # Prepare input data for each agent
+        agent_inputs = self._prepare_agent_inputs(input_data)
         
-        while iteration < self.max_iterations:
-            logger.info(f"ReAct iteration {iteration + 1}")
+        # Run agents in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all agent tasks
+            future_to_agent = {
+                executor.submit(agent.analyze, agent_inputs[agent_name]): agent_name
+                for agent_name, agent in self.agents.items()
+            }
             
-            # Think: Analyze current state and plan next action
-            action_plan = self._think(current_state)
-            
-            # Act: Execute the planned action
-            action_result = self._act(action_plan, current_state)
-            
-            # Observe: Update state based on action results
-            current_state = self._observe(current_state, action_result)
-            
-            # Check if we have enough information
-            if self._has_sufficient_information(current_state):
-                logger.info("Sufficient information gathered, proceeding to final evaluation")
-                break
-                
-            # If not enough info, ask for clarification
-            if iteration == self.max_iterations - 1:
-                current_state = self._request_clarification(current_state)
-                
-            iteration += 1
-            
-        # Final evaluation and response generation
-        final_result = self._generate_final_evaluation(current_state)
+            # Collect results as they complete
+            for future in as_completed(future_to_agent):
+                agent_name = future_to_agent[future]
+                try:
+                    result = future.result()
+                    agent_results[agent_name] = result
+                    logger.info(f"Agent {agent_name} completed analysis")
+                except Exception as e:
+                    logger.error(f"Agent {agent_name} failed: {e}")
+                    agent_results[agent_name] = self._create_error_result(agent_name, str(e))
         
-        # Update conversation history
-        self.conversation_history.append({
-            'user_input': user_input,
-            'final_result': final_result,
-            'iterations': iteration + 1
-        })
-        
-        return final_result
+        return agent_results
     
-    def _initialize_state(self, user_input: UserInputDTO) -> Dict[str, Any]:
-        """Initialize the working state for the ReAct loop."""
-        return {
-            'user_input': user_input,
-            'image_analysis': None,
-            'text_analysis': None,
-            'missing_information': [],
-            'confidence_score': 0.0,
-            'recommendations': [],
-            'iteration_data': []
+    def _prepare_agent_inputs(self, input_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Prepare input data for each agent.
+        
+        Args:
+            input_data: Original input data
+            
+        Returns:
+            Dictionary of agent-specific input data
+        """
+        agent_inputs = {}
+        
+        # Common data for all agents
+        common_data = {
+            'patient_info': input_data.get('patient_info', {}),
+            'clinical_context': input_data.get('clinical_context', {})
         }
+        
+        # Image analysis agent
+        agent_inputs['image_analysis'] = {
+            **common_data,
+            'images': input_data.get('images', [])
+        }
+        
+        # Text analysis agent
+        agent_inputs['text_analysis'] = {
+            **common_data,
+            'texts': input_data.get('texts', [])
+        }
+        
+        # Risk assessment agent
+        agent_inputs['risk_assessment'] = {
+            **common_data,
+            'family_history': input_data.get('family_history', {}),
+            'genetic_factors': input_data.get('genetic_factors', {}),
+            'lifestyle_factors': input_data.get('lifestyle_factors', {})
+        }
+        
+        # Symptom analysis agent
+        agent_inputs['symptom_analysis'] = {
+            **common_data,
+            'symptoms': input_data.get('symptoms', []),
+            'clinical_presentation': input_data.get('clinical_presentation', {}),
+            'symptom_duration': input_data.get('symptom_duration', ''),
+            'symptom_severity': input_data.get('symptom_severity', ''),
+            'associated_symptoms': input_data.get('associated_symptoms', [])
+        }
+        
+        # Clinical correlation agent (needs results from other agents)
+        # This will be populated after other agents complete
+        agent_inputs['clinical_correlation'] = {
+            **common_data,
+            'image_analysis': {},
+            'text_analysis': {},
+            'risk_assessment': {},
+            'symptom_analysis': {}
+        }
+        
+        return agent_inputs
     
-    def _think(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Think phase: Analyze current state and plan next action.
+    def _implement_voting_mechanism(self, agent_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Implement voting mechanism for consensus.
         
-        This is the first step of the ReAct pattern where the AI analyzes
-        the current situation and decides what action to take next.
-        """
-        prompt = self._build_thinking_prompt(state)
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},  # Forces valid JSON response
-                messages=[
-                    {"role": "system", "content": system_message_orchestrator},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1
-            )
+        Args:
+            agent_results: Results from all agents
             
-            # Parse the response to extract action plan
-            action_plan = self._parse_action_plan(response.choices[0].message.content)
-            return action_plan
+        Returns:
+            Voting results and consensus
+        """
+        votes = {
+            'cancer_positive': 0,
+            'cancer_negative': 0,
+            'uncertain': 0
+        }
+        
+        agent_analyses = []
+        
+        for agent_name, result in agent_results.items():
+            if 'error' in result:
+                # Skip agents with errors
+                continue
             
-        except Exception as e:
-            logger.error(f"Error in thinking phase: {e}")
-            return {'action': 'error', 'reason': str(e)}
-    
-    def _act(self, action_plan: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Act phase: Execute the planned action.
-        
-        This is the second step of the ReAct pattern where we execute
-        the action that was planned in the Think phase.
-        """
-        action = action_plan.get('action', 'unknown')
-        
-        try:
-            if action == 'analyze_image':
-                if state['user_input'].get('image'):
-                    result = self.image_analyzer.analyze(state['user_input']['image'])
-                    return {'action': 'image_analysis', 'result': result}
+            prediction = result.get('prediction', False)
+            confidence = result.get('confidence', 0.0)
+            
+            # Determine vote based on prediction and confidence
+            if confidence >= config.CONFIDENCE_THRESHOLD:
+                if prediction:
+                    votes['cancer_positive'] += 1
                 else:
-                    return {'action': 'error', 'reason': 'No image provided'}
-                    
-            elif action == 'analyze_text':
-                result = self.text_analyzer.analyze(state['user_input'].get('username', ''))
-                return {'action': 'text_analysis', 'result': result}
-                
-            elif action == 'request_info':
-                return {'action': 'info_request', 'fields': action_plan.get('required_fields', [])}
-                
-            elif action == 'evaluate':
-                return {'action': 'evaluation', 'ready': True}
-                
+                    votes['cancer_negative'] += 1
             else:
-                return {'action': 'unknown', 'reason': f'Unknown action: {action}'}
-                
-        except Exception as e:
-            logger.error(f"Error in action phase: {e}")
-            return {'action': 'error', 'reason': str(e)}
-    
-    def _observe(self, state: Dict[str, Any], action_result: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Observe phase: Update state based on action results.
-        
-        This is the third step of the ReAct pattern where we update our
-        understanding based on what happened in the Act phase.
-        """
-        action = action_result.get('action')
-        
-        # Update confidence scores based on action results
-        if action == 'image_analysis':
-            state['image_analysis'] = action_result.get('result')
-            state['confidence_score'] += 0.3  # Image analysis provides good information
+                votes['uncertain'] += 1
             
-        elif action == 'text_analysis':
-            state['text_analysis'] = action_result.get('result')
-            state['confidence_score'] += 0.3  # Text analysis provides good information
-            
-        elif action == 'info_request':
-            state['missing_information'] = action_result.get('fields', [])
-            state['confidence_score'] -= 0.2  # Requesting info reduces confidence
-            
-        elif action == 'evaluation':
-            state['confidence_score'] += 0.4  # Final evaluation boosts confidence
-            
-        # Record iteration data for transparency and debugging
-        state['iteration_data'].append({
-            'action': action,
-            'result': action_result,
-            'confidence': state['confidence_score']
-        })
-        
-        return state
-    
-    def _has_sufficient_information(self, state: Dict[str, Any]) -> bool:
-        """Check if we have enough information to proceed."""
-        return (
-            state['confidence_score'] >= 0.7 and
-            (state['image_analysis'] is not None or state['text_analysis'] is not None) and
-            len(state['missing_information']) == 0
-        )
-    
-    def _request_clarification(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Request clarification when information is insufficient."""
-        missing_fields = state.get('missing_information', [])
-        
-        clarification_request = {
-            'type': 'clarification_needed',
-            'message': 'Additional information is required to complete the evaluation.',
-            'missing_fields': missing_fields,
-            'current_confidence': state['confidence_score']
-        }
-        
-        state['clarification_request'] = clarification_request
-        return state
-    
-    def _generate_final_evaluation(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate the final evaluation based on gathered information."""
-        try:
-            evaluation_prompt = self._build_evaluation_prompt(state)
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_message_orchestrator},
-                    {"role": "user", "content": evaluation_prompt}
-                ],
-                temperature=0.1
+            # Create agent analysis record
+            agent_analysis = AgentAnalysis(
+                agent_id=result.get('agent_id', agent_name),
+                analysis_type=result.get('analysis_type', 'unknown'),
+                prediction=prediction,
+                confidence=confidence,
+                reasoning=result.get('reasoning', 'No reasoning provided'),
+                key_findings=result.get('key_findings', []),
+                risk_factors=result.get('risk_factors', []),
+                additional_data=result
             )
+            agent_analyses.append(agent_analysis)
+        
+        # Determine consensus
+        total_votes = sum(votes.values())
+        if total_votes == 0:
+            consensus = 'no_consensus'
+            cancer_prediction = False
+            confidence_score = 0.0
+        else:
+            max_votes = max(votes.values())
+            if votes['cancer_positive'] == max_votes and votes['cancer_positive'] >= config.VOTING_THRESHOLD:
+                consensus = 'cancer_positive'
+                cancer_prediction = True
+                confidence_score = votes['cancer_positive'] / total_votes
+            elif votes['cancer_negative'] == max_votes and votes['cancer_negative'] >= config.VOTING_THRESHOLD:
+                consensus = 'cancer_negative'
+                cancer_prediction = False
+                confidence_score = votes['cancer_negative'] / total_votes
+            else:
+                consensus = 'uncertain'
+                cancer_prediction = False
+                confidence_score = 0.5  # Neutral confidence for uncertain cases
+        
+        return {
+            'consensus': consensus,
+            'cancer_prediction': cancer_prediction,
+            'confidence_score': confidence_score,
+            'votes': ConsensusVotes(**votes),
+            'agent_analyses': agent_analyses
+        }
+    
+    def _create_final_assessment(self, agent_results: Dict[str, Dict[str, Any]], 
+                               voting_result: Dict[str, Any], 
+                               input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create final assessment using LLM.
+        
+        Args:
+            agent_results: Results from all agents
+            voting_result: Voting mechanism results
+            input_data: Original input data
             
-            evaluation = response.choices[0].message.content
+        Returns:
+            Final assessment results
+        """
+        try:
+            # Prepare input for final assessment
+            assessment_input = self._create_assessment_input(agent_results, voting_result)
             
+            # Call LLM for final assessment
+            messages = self._create_messages(assessment_input)
+            response = self._call_llm(messages, temperature=0.0)
+            
+            # Parse response
+            parsed_response = self._parse_json_response(response)
+            
+            # Create final result
+            final_result = {
+                'status': 'completed',
+                'cancer_prediction': voting_result['cancer_prediction'],
+                'confidence_score': voting_result['confidence_score'],
+                'consensus_votes': voting_result['votes'].dict(),
+                'agent_analyses': [analysis.dict() for analysis in voting_result['agent_analyses']],
+                'final_assessment': parsed_response.get('final_assessment', 'Assessment completed'),
+                'recommendations': parsed_response.get('recommendations', []),
+                'urgency_level': parsed_response.get('urgency_level', 'medium'),
+                'requires_clinical_review': parsed_response.get('requires_clinical_review', True),
+                'iterations_used': 1,
+                'consensus': voting_result['consensus']
+            }
+            
+            return final_result
+            
+        except Exception as e:
+            logger.error(f"Final assessment failed: {e}")
+            # Return basic result without LLM assessment
             return {
                 'status': 'completed',
-                'confidence_score': state['confidence_score'],
-                'evaluation': evaluation,
-                'image_analysis': state.get('image_analysis'),
-                'text_analysis': state.get('text_analysis'),
-                'recommendations': state.get('recommendations', []),
-                'iterations_used': len(state['iteration_data'])
+                'cancer_prediction': voting_result['cancer_prediction'],
+                'confidence_score': voting_result['confidence_score'],
+                'consensus_votes': voting_result['votes'].dict(),
+                'agent_analyses': [analysis.dict() for analysis in voting_result['agent_analyses']],
+                'final_assessment': f"Basic assessment completed. Consensus: {voting_result['consensus']}",
+                'recommendations': ['Clinical review recommended'],
+                'urgency_level': 'medium',
+                'requires_clinical_review': True,
+                'iterations_used': 1,
+                'consensus': voting_result['consensus']
             }
+    
+    def _create_assessment_input(self, agent_results: Dict[str, Dict[str, Any]], 
+                               voting_result: Dict[str, Any]) -> str:
+        """Create input for final assessment.
+        
+        Args:
+            agent_results: Results from all agents
+            voting_result: Voting mechanism results
             
-        except Exception as e:
-            logger.error(f"Error in final evaluation: {e}")
-            return {
-                'status': 'error',
-                'error': str(e),
-                'confidence_score': state['confidence_score']
-            }
-    
-    def _build_thinking_prompt(self, state: Dict[str, Any]) -> str:
-        """Build prompt for the thinking phase."""
-        prompt = f"""
-        Current State Analysis:
-        - User Query: {state['user_input'].get('username', 'N/A')}
-        - Image Available: {'Yes' if state['user_input'].get('image') else 'No'}
-        - Current Confidence: {state['confidence_score']:.2f}
-        - Missing Information: {state.get('missing_information', [])}
-        
-        Based on this state, what is the next action needed?
-        
-        Available actions:
-        1. analyze_image - if image needs analysis
-        2. analyze_text - if text needs analysis  
-        3. request_info - if specific information is missing
-        4. evaluate - if ready for final evaluation
-        
-        Respond with a valid JSON object containing:
-        - action: one of the available actions
-        - reason: explanation for the chosen action
-        - required_fields: list of fields needed (empty list if not requesting info)
+        Returns:
+            Formatted assessment input
         """
-        return prompt
+        input_parts = []
+        
+        # Add voting results
+        input_parts.append(f"Voting Results: {voting_result['consensus']}")
+        input_parts.append(f"Cancer Prediction: {voting_result['cancer_prediction']}")
+        input_parts.append(f"Confidence Score: {voting_result['confidence_score']}")
+        
+        # Add agent results summary
+        for agent_name, result in agent_results.items():
+            if 'error' not in result:
+                input_parts.append(f"""
+{agent_name.upper()} AGENT:
+- Prediction: {result.get('prediction', 'N/A')}
+- Confidence: {result.get('confidence', 'N/A')}
+- Key Findings: {result.get('key_findings', [])}
+- Reasoning: {result.get('reasoning', 'N/A')}
+                """)
+        
+        # Add assessment instructions
+        input_parts.append("""
+Please provide a comprehensive final assessment based on the voting results and agent analyses.
+Consider:
+1. Overall consensus and confidence
+2. Key findings from all agents
+3. Clinical recommendations
+4. Urgency level determination
+5. Need for clinical review
+        """)
+        
+        return "\n\n".join(input_parts)
     
-    def _build_evaluation_prompt(self, state: Dict[str, Any]) -> str:
-        """Build prompt for the final evaluation phase."""
-        prompt = f"""
-        Final Evaluation Request:
+    def _create_error_result(self, agent_name: str, error_message: str) -> Dict[str, Any]:
+        """Create error result for failed agent.
         
-        User Input: {state['user_input'].get('username', 'N/A')}
-        Image Analysis: {state.get('image_analysis', 'Not available')}
-        Text Analysis: {state.get('text_analysis', 'Not available')}
-        Confidence Score: {state['confidence_score']:.2f}
-        
-        Please provide a comprehensive medical evaluation including:
-        1. Summary of findings
-        2. Risk assessment
-        3. Recommendations
-        4. Next steps
-        
-        Format your response as a structured medical report.
+        Args:
+            agent_name: Name of the failed agent
+            error_message: Error message
+            
+        Returns:
+            Error result dictionary
         """
-        return prompt
+        return {
+            'agent_id': agent_name,
+            'analysis_type': agent_name,
+            'prediction': False,
+            'confidence': 0.0,
+            'reasoning': f"Agent failed: {error_message}",
+            'key_findings': [],
+            'risk_factors': [],
+            'error': error_message
+        }
     
-    def _parse_action_plan(self, response: str) -> Dict[str, Any]:
+    def _handle_error(self, error: Exception, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle errors during orchestration.
+        
+        Args:
+            error: The error that occurred
+            input_data: Input data that caused the error
+            
+        Returns:
+            Error response
         """
-        Parse the action plan from the thinking phase response.
+        logger.error(f"Orchestration error: {error}")
         
-        Since we use response_format={"type": "json_object"}, the response
-        is guaranteed to be valid JSON, so parsing is trivial.
-        """
-        try:
-            # Parse the JSON response and validate against our schema
-            plan = ActionPlan.model_validate_json(response)
-            logger.info(f"Successfully parsed and validated action plan: {plan}")
-            return plan.model_dump()
-        except ValidationError as e:
-            logger.error(f"Invalid action plan JSON: {e}")
-            return {"action": "evaluate", "reason": "Validation failed", "required_fields": []}
-        except Exception as e:
-            logger.error(f"Unexpected error parsing action plan: {e}")
-            return {"action": "evaluate", "reason": f"Parse error: {str(e)}", "required_fields": []}
-    
-    def get_conversation_history(self) -> List[Dict[str, Any]]:
-        """Get the conversation history for debugging/analysis."""
-        return self.conversation_history
-    
-    def reset_conversation(self) -> None:
-        """Reset the conversation history."""
-        self.conversation_history = []
-        
-        
+        return {
+            'status': 'error',
+            'cancer_prediction': False,
+            'confidence_score': 0.0,
+            'consensus_votes': {'cancer_positive': 0, 'cancer_negative': 0, 'uncertain': 0},
+            'agent_analyses': [],
+            'final_assessment': f"Analysis failed due to error: {str(error)}",
+            'recommendations': ['Manual review required'],
+            'urgency_level': 'medium',
+            'requires_clinical_review': True,
+            'iterations_used': 0,
+            'error': str(error)
+        }

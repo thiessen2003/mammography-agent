@@ -1,1 +1,0 @@
-# Static resources package for the mammography agent 
