@@ -1,158 +1,93 @@
-# ==========================================
-# PREPROCESSAMENTO + FINE-TUNING (LLAVA-MED)
-# ==========================================
-
-import os
+# VERSÃO ULTRA SIMPLES - processamento individual
 import pandas as pd
 from PIL import Image
-from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset, DataLoader
+from datasets import Dataset
+from transformers import BlipProcessor, BlipForConditionalGeneration, TrainingArguments, Trainer
+from peft import LoraConfig, get_peft_model
 import torch
-from transformers import AutoProcessor, AutoModelForVision2Seq, Trainer, TrainingArguments
 
-# -------------------------------------
-# CONFIGURAÇÕES
-# -------------------------------------
-CSV_PATH = '../data/final_embed448_copy_norep.csv'
-IMAGE_SIZE = (336, 1334)       # dimensões esperadas pelo modelo
-MODEL_ID = "rohithbojja/llava-med-v1.6"
-OUTPUT_DIR = "./llava-med-finetuned"
+# Config
+CSV_PATH = "../data/final_embed448_copy_norep.csv"
+MODEL_ID = "Salesforce/blip-image-captioning-base"
+OUTPUT_DIR = "./blip-working"
 
-# -------------------------------------
-# NORMALIZAÇÃO DE LABELS
-# -------------------------------------
-def normalize_label(desc: str) -> str | None:
-    if not isinstance(desc, str):
-        return None
-
+def normalize_label(desc):
+    if not isinstance(desc, str): return None
     desc = desc.lower().strip()
+    if "cranio-caudal exaggerated" in desc: return "XCC"
+    elif "cranio-caudal" in desc: return "CC"
+    elif "medio-lateral oblique" in desc: return "MLO"
+    elif "medio-lateral" in desc: return "ML"
+    return None
 
-    if "cranio-caudal exaggerated" in desc or "cranio-caudal exaggerated laterally" in desc:
-        return "exaggerated craniocaudal (XCC)"
-    elif "cranio-caudal" in desc:
-        return "craniocaudal (CC)"
-    elif "medio-lateral oblique" in desc or "mediolateral oblique" in desc:
-        return "mediolateral oblique (MLO)"
-    elif "medio-lateral" in desc or "mediolateral" in desc:
-        return "mediolateral (ML)"
-    else:
-        return None
+# Carregar dados
+df = pd.read_csv(CSV_PATH, dtype=str)
+df['view'] = df["0_ViewCodeSequence_CodeMeaning"].apply(normalize_label)
+df = df[df['view'].notna()].reset_index(drop=True)
+print(f"📊 {len(df)} amostras")
 
+# Carregar modelo
+processor = BlipProcessor.from_pretrained(MODEL_ID)
+model = BlipForConditionalGeneration.from_pretrained(MODEL_ID)
 
-# -------------------------------------
-# CARREGAR E PREPARAR DADOS
-# -------------------------------------
-df = pd.read_csv(CSV_PATH)
+# LoRA
+lora_config = LoraConfig(r=8, lora_alpha=16, target_modules=["query", "value"], lora_dropout=0.05)
+model = get_peft_model(model, lora_config)
 
-if "0_ViewCodeSequence_CodeMeaning" not in df.columns or "path" not in df.columns:
-    raise ValueError("O CSV deve conter as colunas '0_ViewCodeSequence_CodeMeaning' e 'path'.")
+# PRÉ-PROCESSAMENTO INDIVIDUAL SIMPLES
+print("🔄 Pré-processando...")
 
-df["view"] = df["0_ViewCodeSequence_CodeMeaning"].apply(normalize_label)
-df = df[df["view"].notna()].reset_index(drop=True)
-
-print("Distribuição das labels normalizadas:")
-print(df["view"].value_counts(), "\n")
-
-# -------------------------------------
-# REDIMENSIONAR IMAGENS
-# -------------------------------------
-def resize_image(image_path: str, size: tuple[int, int] = IMAGE_SIZE):
+processed_samples = []
+for idx, row in df.iterrows():
     try:
-        with Image.open(image_path) as img:
-            img = img.convert("RGB")
-            img = img.resize(size)
-            img.save(image_path)
-    except Exception as e:
-        print(f"Erro ao processar {image_path}: {e}")
-
-for img_path in df["path"]:
-    if os.path.exists(img_path):
-        resize_image(img_path)
-    else:
-        print(f"Imagem não encontrada: {img_path}")
-
-# -------------------------------------
-# DIVISÃO TREINO/VALIDAÇÃO
-# -------------------------------------
-train_df, val_df = train_test_split(df, test_size=0.2, stratify=df["view"], random_state=42)
-train_df.to_csv("train_clean.csv", index=False)
-val_df.to_csv("val_clean.csv", index=False)
-
-print(f"Treino: {len(train_df)} imagens | Validação: {len(val_df)} imagens\n")
-
-
-# -------------------------------------
-# DEFINIÇÃO DO DATASET
-# -------------------------------------
-class MammographyDataset(Dataset):
-    def __init__(self, df, image_dir, processor):
-        self.df = df.reset_index(drop=True)
-        self.processor = processor
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        image_path = row["path"]
-        image = Image.open(image_path).convert("RGB")
-
-        prompt = f"Identify the mammographic view of this image."
-        text = row["view"]
-
-        inputs = self.processor(
+        image = Image.open(row['path']).convert('RGB')
+        inputs = processor(
             images=image,
-            text=prompt,
-            return_tensors="pt",
-            padding=True
+            text=row['view'],
+            padding="max_length",
+            max_length=32,
+            truncation=True,
+            return_tensors="pt"
         )
+        
+        # Garantir shapes corretos
+        processed_samples.append({
+            'pixel_values': inputs.pixel_values[0],  # Remove batch dimension
+            'input_ids': inputs.input_ids[0],
+            'attention_mask': inputs.attention_mask[0],
+            'labels': inputs.input_ids[0].clone()  # Labels = input_ids para causal LM
+        })
+        
+        if idx % 10 == 0:
+            print(f"✅ {idx+1}/{len(df)}")
+            
+    except Exception as e:
+        print(f"❌ Erro em {row['path']}: {e}")
+        continue
 
-        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
-        inputs["labels"] = self.processor.tokenizer(text, return_tensors="pt").input_ids.squeeze(0)
-
-        return inputs
-
-
-# -------------------------------------
-# PREPARAR MODELO E PROCESSADOR
-# -------------------------------------
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = AutoModelForVision2Seq.from_pretrained(MODEL_ID)
-
-train_dataset = MammographyDataset(train_df, IMAGE_DIR, processor)
-val_dataset = MammographyDataset(val_df, IMAGE_DIR, processor)
-
-# -------------------------------------
-# CONFIGURAÇÃO DO TREINAMENTO
-# -------------------------------------
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=3,
-    per_device_train_batch_size=1,
-    per_device_eval_batch_size=1,
-    evaluation_strategy="epoch",
-    save_strategy="epoch",
-    learning_rate=5e-5,
-    logging_dir="./logs",
-    logging_steps=50,
-    remove_unused_columns=False,
-    save_total_limit=2,
-    fp16=torch.cuda.is_available(),
-    report_to="none"
-)
-
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-)
-
-# -------------------------------------
-# INÍCIO DO TREINAMENTO
-# -------------------------------------
-trainer.train()
-
-print("\nTreinamento finalizado com sucesso.")
-print(f"Modelo salvo em: {OUTPUT_DIR}")
-
+# Criar dataset
+if processed_samples:
+    dataset = Dataset.from_list(processed_samples)
+    print(f"🎉 Dataset: {len(dataset)} amostras")
+    
+    # Treinar
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=3,
+        per_device_train_batch_size=2,
+        learning_rate=1e-4,
+        fp16=True,
+        logging_steps=10,
+    )
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        tokenizer=processor.tokenizer,
+    )
+    
+    print("🚀 Treinando...")
+    trainer.train()
+    trainer.save_model(OUTPUT_DIR)
+    print(f"💾 Salvo em: {OUTPUT_DIR}")
