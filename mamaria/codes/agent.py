@@ -1,23 +1,11 @@
-import pandas as pd
-import base64
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import torch
 from PIL import Image
-from io import BytesIO
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama.chat_models import ChatOllama
 import json
 
-CSV_PATH = '../data/final_embed448_copy_norep.csv'
+OUTPUT_DIR = "./blip-working"
 
-df = pd.read_csv(CSV_PATH)
-
-llava = ChatOllama(
-        model = 'rohithbojja/llava-med-v1.6',
-        format = 'json',
-        temperature = 0
-        )
-
-system_msg = SystemMessage(content = """
+PROMPT = """
                            You are an expert radiologist in breast cancer and digital mammography.
 
                            CLASSIFICATION RULES:
@@ -38,10 +26,7 @@ system_msg = SystemMessage(content = """
 
                            OUTPUT:
                            - Answer strictly in this JSON format:
-                           {
-                            "view": "<breast view or 'undetermined'>",
-                            "explanation": "<one-sentence justification>"
-                           }
+                           {view: <breast view or undetermined>, explanation: <one-sentence justification>}
 
                            --------------------------------------------------------
 
@@ -64,112 +49,34 @@ system_msg = SystemMessage(content = """
                            - MLO is NOT strictly horizontal (ML) and NOT vertical (CC/XCC).
 
                            4. *Fallback*
-                           - If the input lacks compression direction or angle cues -> "undetermined".
+                           - If the input lacks compression direction or angle cues -> undetermined.
+"""
 
-                           -------------------------------------------------------
+# Recarrega modelo e processor
+processor = BlipProcessor.from_pretrained(OUTPUT_DIR)
+model = BlipForConditionalGeneration.from_pretrained(OUTPUT_DIR)
+model.eval().to("cuda" if torch.cuda.is_available() else "cpu")
 
-                           BREAST VIEW DEFINITIONS WITH NEGATIVE COUNTEREXAMPLES:
-
-                           1. Exaggerated Craniocaudal (XCC):
-                           - Compression top-to-bottom (like CC).
-                           - Breast pulled laterally or medially to include peripheral tissue not seen in standard CC.
-                           - NOT: a standard CC without extension; NOT: side-to-side or angle views.
-
-                           2. Craniocaudal (CC):
-                           - Compression top-to-bottom.
-                           - X-ray beam vertical.
-                           - Shows medial and lateral breast tissue in a straight top-down view.
-                           - NOT: shifted laterally or medially (that would be XCC); NOT: angled or oblique.
-
-                           3. Mediolateral (ML):
-                           - Compression medial-to-lateral.
-                           - X-ray beam horizontal.
-                           - Produces a pure lateral profile.
-                           - NOT: angle oblique (that would be MLO); NOT: top-down (CC/XCC).
-
-                           4. Mediolateral Oblique (MLO):
-                           - Compression medial-to-lateral at an oblique angle (30 - 60 degrees).
-                           - X-ray beam diagonal.
-                           - Shows upper outer quadrant and axilla.
-                           - NOT: strictly horizontal (ML); NOT: vertical (CC/XCC).
-
-                           ------------------------------------------------------
-
-                           CONTRAST SUMMARY (memorize for classification):
-                           
-                           - CC = vertical top-down.
-                           - XCC = vertical top-down, but shifted sideways to include extra tissue.
-                           - ML = pure side-to-side (horizontal).
-                           - MLO = angled diagonal (30 - 60 degrees), includes axilla.
-
-                           ------------------------------------------------------
-
-                           EXAMPLES:
-
-                           Input: "Digital mammography. Breast compressed top-to-bottom, image emphasizes peripheral tissue."
-                           Output: 
-                           {
-                            "view": "exaggerated craniocaudal (XCC)",
-                            "explanation": "top-down compression with lateral extension beyond standard CC."
-                           }
-
-                           Input: "Digital mammography. Breast compressed top-to-bottom, image shows medial and lateral regions equally."
-                           Output:
-                           {
-                            "view": "craniocaudal (CC)",
-                            "explanation": "straight vertical compression showing medial and lateral tissue."
-                           }
-
-                           Input: "Digital mammography. Breast compressed side-to-side, producing a pure lateral profile."
-                           Output:
-                           {
-                            "view": "mediolateral (ML)",
-                            "explanation": "horizontal compression creates strict side profile."
-                           } 
-
-                           input: "Digital mammography. Breast compressed at an oblique angle, including axilla."
-                           Output:
-                           {
-                            "view": "mediolateral oblique (MLO)",
-                            "explanation": "diagonal orientation highlights axilla and upper outer quadrant."
-                           }
-
-                           Input: "Digital mammography. Breast image with no clear compression direction or angle."
-                           Output:
-                           {
-                            "view": "undetermined",
-                            "explanation": "insufficient information about compression direction or orientation."
-                           } 
-                           """.strip())
-
-results = []
-
-for i, row in df.iterrows():
-    if i > 20:
-        break
-
-    image_path = row['path']
+def generate_prediction(model, processor, image_path):
+    image = Image.open(image_path).convert('RGB')
+    inputs = processor(images=image, text=PROMPT, return_tensors="pt").to(model.device)
     
-    print(f"Image path for {i}-th case: {image_path}")
-    img = Image.open(image_path).convert('RGB')
-    buffer = BytesIO()
-    img.save(buffer, format = "JPEG")
-    image_bytes = buffer.getvalue()
-    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-    image_content = f"data:image/jpg;base64,{image_b64}"
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_length=64,
+            num_beams=5,
+            early_stopping=True,
+            do_sample=True,
+            temperature=0.7
+        )
 
+    text = processor.decode(outputs[0], skip_special_tokens=True)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw_output": text}
 
-    user_msgs = [
-            HumanMessage(content=[
-                {'type': 'text', 'text': f"This is a digital mammography. From which view has it been taken?"}, 
-                {'type': 'image_url', 'image_url': image_content}
-                ])
-            ]
-
-    response = llava.invoke([system_msg] + user_msgs)
-
-    parsed = response.content
-
-    results.append(parsed)
-
-    print(f"For {i}-th case: {parsed}")
+# Exemplo
+result = generate_prediction(model, processor, "/mnt/d/Users/miguel/embed336x1334/60790166_3323267960938479_cranio-caudal_L.jpg")
+print(result)
