@@ -1,4 +1,3 @@
-# ULTRA SIMPLE VERSION - individual processing
 import pandas as pd
 from PIL import Image
 from datasets import Dataset
@@ -60,7 +59,6 @@ lora_config = LoraConfig(r=8, lora_alpha=16, target_modules=["query", "value"], 
 model = get_peft_model(model, lora_config)
 model.config.label_smoothing = 0.1
 
-# SIMPLE INDIVIDUAL PRE-PROCESSING
 print("Pre-processing...")
 
 processed_samples = []
@@ -69,7 +67,6 @@ for idx, row in df.iterrows():
         print(f"Image path: {row['path']}.")
         image = Image.open(row['path']).convert('RGB')
         
-        # Create target text in JSON format (with pre-defined explanations for training)
         target_text = create_training_target(row['view'])
         
         inputs = processor(
@@ -83,10 +80,10 @@ for idx, row in df.iterrows():
         
         # Ensure correct shapes
         processed_samples.append({
-            'pixel_values': inputs.pixel_values[0],  # Remove batch dimension
+            'pixel_values': inputs.pixel_values[0],
             'input_ids': inputs.input_ids[0],
             'attention_mask': inputs.attention_mask[0],
-            'labels': inputs.input_ids[0].clone()  # Labels = input_ids for causal LM
+            'labels': inputs.input_ids[0].clone()
         })
         
         if idx % 10 == 0:
@@ -101,7 +98,6 @@ if processed_samples:
     dataset = Dataset.from_list(processed_samples)
     print(f"Dataset: {len(dataset)} samples")
     
-    # Training
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         num_train_epochs=10,
@@ -128,13 +124,11 @@ if processed_samples:
     processor.save_pretrained(OUTPUT_DIR)
     print(f"Saved to: {OUTPUT_DIR}")
 
-# Function for post-training inference - model generates explanations freely
 def generate_prediction(model, processor, image_path):
     """Generate prediction with free-form explanations after training"""
     try:
         image = Image.open(image_path).convert('RGB')
         
-        # Generate caption - model will create its own explanations
         inputs = processor(images=image, return_tensors="pt")
         
         with torch.no_grad():
@@ -143,24 +137,19 @@ def generate_prediction(model, processor, image_path):
                 max_length=64,
                 num_beams=5,
                 early_stopping=True,
-                do_sample=True,  # Allow creativity in explanations
-                temperature=0.7,  # Balance between creativity and consistency
+                do_sample=True,
+                temperature=0.7,
             )
         
         prediction = processor.decode(outputs[0], skip_special_tokens=True)
         
-        # Try to parse as JSON
         try:
             result = json.loads(prediction)
             return result
-        except json.JSONDecodeError:
-            # If not valid JSON, try to extract view and explanation
-            return {"raw_output": prediction}
             
     except Exception as e:
         return {"error": str(e)}
 
-# Function to test multiple images
 def batch_predict(model, processor, image_paths):
     """Generate predictions for multiple images"""
     results = []
