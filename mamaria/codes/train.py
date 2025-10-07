@@ -48,6 +48,7 @@ def create_training_target(view):
 df = pd.read_csv(CSV_PATH, dtype=str)
 df['view'] = df["0_ViewCodeSequence_CodeMeaning"].apply(normalize_label)
 df = df[df['view'].notna()].reset_index(drop=True)
+df = df.loc[1 : 1000]
 print(f"Data: {len(df)} samples")
 
 # Load model
@@ -57,6 +58,7 @@ model = BlipForConditionalGeneration.from_pretrained(MODEL_ID)
 # LoRA
 lora_config = LoraConfig(r=8, lora_alpha=16, target_modules=["query", "value"], lora_dropout=0.05)
 model = get_peft_model(model, lora_config)
+model.config.label_smoothing = 0.1
 
 # SIMPLE INDIVIDUAL PRE-PROCESSING
 print("Pre-processing...")
@@ -64,6 +66,7 @@ print("Pre-processing...")
 processed_samples = []
 for idx, row in df.iterrows():
     try:
+        print(f"Image path: {row['path']}.")
         image = Image.open(row['path']).convert('RGB')
         
         # Create target text in JSON format (with pre-defined explanations for training)
@@ -101,12 +104,15 @@ if processed_samples:
     # Training
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=3,
+        num_train_epochs=10,
         per_device_train_batch_size=2,
-        learning_rate=1e-4,
+        learning_rate=5e-5,
         fp16=True,
         logging_steps=10,
         prediction_loss_only=True,
+        optim="adamw_torch",
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.1
     )
     
     trainer = Trainer(
@@ -119,6 +125,7 @@ if processed_samples:
     print("Training...")
     trainer.train()
     trainer.save_model(OUTPUT_DIR)
+    processor.save_pretrained(OUTPUT_DIR)
     print(f"Saved to: {OUTPUT_DIR}")
 
 # Function for post-training inference - model generates explanations freely
@@ -168,3 +175,8 @@ def batch_predict(model, processor, image_paths):
 print("\nTraining completed! The model can now generate free-form explanations.")
 print("Use generate_prediction() for single images or batch_predict() for multiple images.")
 print("The model will create its own explanations based on learned patterns.")
+print("\nExample: ")
+image = "/mnt/d/Users/miguel/embed_336x1334/43759058_8781705659536271_cranio-caudal_L.jpg"
+print(f"Input: {image}")
+result = generate_prediction(model, processor, image)
+print(result)
