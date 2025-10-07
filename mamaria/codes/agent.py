@@ -52,7 +52,6 @@ PROMPT = """
                            - If the input lacks compression direction or angle cues -> undetermined.
 """
 
-# Recarrega modelo e processor
 processor = BlipProcessor.from_pretrained(OUTPUT_DIR)
 model = BlipForConditionalGeneration.from_pretrained(OUTPUT_DIR)
 model.eval().to("cuda" if torch.cuda.is_available() else "cpu")
@@ -77,6 +76,5 @@ def generate_prediction(model, processor, image_path):
     except json.JSONDecodeError:
         return {"raw_output": text}
 
-# Exemplo
 result = generate_prediction(model, processor, "/mnt/d/Users/miguel/embed336x1334/60790166_3323267960938479_cranio-caudal_L.jpg")
 print(result)
